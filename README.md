@@ -1,16 +1,14 @@
 # Conference CFP Tracker
 
-Automatically discover open Call for Papers (CFPs), keep a clean JSON database, sync to Notion, and notify your team on Slack, all on autopilot, every day.
+Automatically discover open Call for Papers (CFPs), keep a local JSON database, and sync them every day.
 
-> Built for DevRel and developer advocacy teams who want to stop manually hunting for speaking opportunities. This project sits on top of the [developers.events](https://developers.events/) open data, automates the tracking in Notion, and lets your team curate and share only the relevant CFPs to the rest of the company via Slack.
-
-This project is actively used at **[Percona](https://www.percona.com/)** in the community team to track speaking opportunities for our developer relations team. The screenshots and examples throughout this README reflect our setup, your Notion database name, field names, and Slack channel will likely differ, and that's fine. Adapt them to match your team's workflow.
-
-<!-- screenshot: overview of the Notion database with CFPs -->
+Edith built the original tracker to sync those CFPs into Notion. This fork keeps her pipeline and points the same steps at Jira project **SPEAK** instead. The Notion script is still in `scripts/sync_notion.py`. The daily job runs `scripts/sync_jira.py`.
 
 ---
 
 ## How it works
+
+Edith's Notion flow:
 
 ```
 developers.events (public API)
@@ -22,216 +20,150 @@ developers.events (public API)
   Sync to Notion (create / update / close)
         ↓
   Team reviews → sets status to "Slacked"
-        ↓
-  Notion automation → posts to #speaking-opportunities on Slack
 ```
 
-The pipeline runs automatically every day via GitHub Actions. No manual work needed unless you want to review and promote a CFP to your team.
+The same flow, now in Jira:
+
+```
+developers.events (public API)
+        ↓
+  Fetch & filter open CFPs daily
+        ↓
+  Local JSON database (data/events.json)
+        ↓
+  Sync to Jira SPEAK (create / update / close)
+        ↓
+  Team reviews on the Conference card
+```
+
+The pipeline runs every day via GitHub Actions. developers.events already lists only public, community tech conferences that have a CFP. Closed CFPs are not imported. An optional `--filter` flag can further limit events by technology and country (`scripts/filters.py`). It is off by default, so the daily run imports every open CFP, the same way the Notion sync did.
+
+### What the sync does
+
+SPEAK already has conferences the team added by hand. The sync only touches issues it created itself (label `cfp-sync`, **CFP Source** = `developers.events`). Everything else is left alone. That is the same rule as Notion's `[CFP] Source = developers.events`.
+
+- **Create**: a new open CFP becomes a Conference with **CFP Status** `Open`, **CFP Source** `developers.events`, and labels `developers-events` and `cfp-sync`.
+- **Update**: only source-owned fields are touched: **CFP Deadline**, **CFP Link**, and **Technology**. **Start date**, **Finish Date**, and **Due date** are updated when the event is rescheduled, unless a manager has already edited the card. Manual triage (`Slacked`, `Manual`, notes, assignee) is kept.
+- **Reconcile**: a `cfp-sync` conference that disappears from the open feed gets **CFP Status** `Closed`. If nobody has triaged it (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` too. Cards a manager already moved are not pulled back.
+
+Matching is URL-based (lowercase host, no `www`, no query string, no trailing slash). If a conference changes its URL, a new issue is created and the old one is closed. Two CFPs that share one URL become one card; the later deadline is kept.
 
 ---
 
 ## Data source
 
-CFP data comes from [**developers.events**](https://developers.events/), an open-source project created by [**Aurélie Vache**](https://www.linkedin.com/in/aurelievache/) and maintained by her and the community. Thank you Aurélie for making this data publicly available!
-
-This is not a list of all conferences, it covers **community-driven tech and developer conferences** only. To be listed on developers.events, an event must offer a CFP, be open to the public, and target a developer/tech audience. 
+CFP data comes from [**developers.events**](https://developers.events/), an open-source project created by [**Aurélie Vache**](https://www.linkedin.com/in/aurelievache/) and maintained by her and the community. Thank you Aurélie for making this data publicly available.
 
 The project consumes two public JSON feeds:
+
 - `https://developers.events/all-events.json`
 - `https://developers.events/all-cfps.json`
 
 ---
 
-## Integrations
+## What lands in Jira
 
-| Tool | Role |
+New conferences are created in project **SPEAK**, issue type **Conference**.
+
+| Jira field | Source |
 |---|---|
-| **developers.events** | Source of all CFP data |
-| **Notion** | Central database to track and manage CFPs |
-| **Slack** | Team notifications via a Notion Automation |
-| **GitHub Actions** | Runs the pipeline daily at 04:00 UTC |
+| Summary | Conference name |
+| Conf URL | Event URL |
+| CFP Link / CFP Deadline | Open CFP |
+| Start date / Finish Date / Due date | Event dates. Due date matches Finish, or Start for a one-day event |
+| City / Country / Offline-Online | Location |
+| Technology | `tech` and `topic` tags |
+| CFP Source | `developers.events` |
+| CFP Status | `Open` while the CFP is in the feed, `Closed` when it drops out |
+| Labels | `developers-events`, `cfp-sync` |
 
----
+`cfp-sync` marks cards this job created. Conferences already in SPEAK are not overwritten.
 
-## Notion database setup
+On later runs, for those cards only:
 
-Create a Notion database with these properties. The names below are the ones we use at Percona,  you can rename them as long as you update the corresponding field names in `scripts/sync_notion.py`.
+- **CFP Deadline**, **CFP Link**, and **Technology** are updated from the feed.
+- **Start date**, **Finish Date**, and **Due date** are updated when the event is rescheduled, unless the Jira history already has an edit from a manager.
+- When the CFP leaves the open feed, **CFP Status** becomes `Closed`. If nobody has triaged the card (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` as well. `Slacked` and `Manual` are left in place while the CFP is still open.
 
-| Property | Type |
-|---|---|
-| Name | Title |
-| URL | URL |
-| CFP URL | URL |
-| CFP Dates | Date |
-| Date | Date (start + end) |
-| Event Location | Rich text |
-| Technology | Multi-select |
-| [CFP] Status | Status: `Open`, `Active`, `Sent to Slack`, `Closed`, `Archived`, `Needs Review` |
-| [CFP] Source | Select: `developers.events` |
-
-### What the sync does
-
-Your Notion database can contain two types of entries: events automatically imported from `developers.events`, and events your team added manually. The `[CFP] Source` field is what distinguishes them — the sync only ever touches rows where `[CFP] Source = developers.events`, so your manually entered events are always left untouched.
-
-- **Create**: new CFPs are added with status `Open` and source `developers.events`.
-- **Update**: only source-controlled fields are touched (`CFP Dates`, `CFP URL`, `Technology`). All manual edits (status, notes, tags) are preserved.
-- **Reconcile**: pages sourced from `developers.events` that no longer appear in the feed are automatically marked `Closed`. Manual entries are never affected.
-
-Matching is URL-based (normalized: lowercase, no query params, no trailing slash). If a conference changes its URL, a new page is created and the old one is closed.
-
-![Notion database view](img/notion.png)
-
----
-
-## Connect Notion to this project
-
-To allow the scripts to read and write to your Notion database, you need to create an internal integration in Notion and connect it to your database. This is a one-time setup that gives you the API token the project needs.
-
-1. Go to [https://www.notion.so/profile/integrations](https://www.notion.so/profile/integrations) and create a new **internal integration**.
-2. Make sure it has these capabilities: **Can read content**, **Can insert content**, **Can update content**.
-3. Copy the **Internal Integration Secret**, this is your `NOTION_API_TOKEN`.
-4. Open your Notion database → click `...` (top right) → **Connections** → **Add connection** → select your integration.
-5. Copy the **Database ID** from the database URL,  this is your `NOTION_DATABASE_ID`.
-
-<img src="img/conn.png" width="440" height="170" alt="Notion integration connection" />
-
----
-
-## Slack notification setup
-
-### 1. Create the automation
-
-Inside your Notion database, click the **Automate** button (top right) and create a new automation:
-
-- **Trigger**: `[CFP] Status` is set to `Slacked` *(or whatever status name you choose)*
-- **Action**: Post to your Slack channel (we use `#speaking-opportunities` at Percona — use any channel that fits your team)
-
-<img src="img/automation.png" width="222" height="286" alt="Notion automation setup" />
-
-### 2. How the configured automation looks
-
-Once created, the automation will appear in your database automations list showing the trigger and the connected Slack channel. No code required — it runs entirely within Notion.
-
-<img src="img/template.png" width="382" height="504" alt="Notion automation configured view" />
-
-
-### 3. How it looks in Slack
-
-When a team member sets a CFP status to "Slacked", the automation fires and posts to your Slack channel. Anyone in the company can see it, react, or volunteer to submit a talk.
-
-![Notion automation setup](img/slack01.png)
-![Notion automation setup](img/slack02.png)
+Matching is by conference URL (lowercase host, no `www`, no query string, no trailing slash). Two CFPs that share one URL become one card; the later deadline is kept.
 
 ---
 
 ## Setup
 
-To run the pipeline on your own machine, whether to test before deploying, adapt it to your team's setup, or run it without GitHub Actions.
-
 **Requirements:** Python 3.11+
 
 ```bash
-git clone https://github.com/your-org/conference-cfp-tracker.git
-cd conference-cfp-tracker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Set your environment variables:
-
 ```bash
-export NOTION_API_TOKEN='secret_...'
-export NOTION_DATABASE_ID='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+export JIRA_URL='https://percona.atlassian.net'
+export JIRA_USER='you@percona.com'
+export JIRA_TOKEN='...'
 ```
 
-For GitHub Actions, add these as repository secrets (`NOTION_API_TOKEN`, `NOTION_DATABASE_ID`).
+For GitHub Actions, add `JIRA_URL`, `JIRA_USER`, and `JIRA_TOKEN` as repository secrets.
 
 ---
 
 ## Testing locally
 
-Always test locally before pushing or syncing to Notion (Specially if you already have data on it, and please always backup things before to try)
+Preview without writing:
 
-### Step 1:  Test the data fetch (no Notion needed)
+```bash
+python -m scripts.sync_jira --limit 10
+```
+
+Write to Jira:
+
+```bash
+python -m scripts.sync_jira --apply --limit 10
+python -m scripts.sync_jira --apply
+```
+
+Refresh the JSON database on its own:
 
 ```bash
 python -m scripts.main --limit 10
 ```
 
-Expected output:
-```
-Run started at 2026-05-10 04:00:01 UTC
-Updated data/events.json: total=10 | added=8 | updated=2 | closed=0
-
-First 10 events (table):
-Name                                         | External ID                          | CFP closes   | Link
----------------------------------------------+--------------------------------------+--------------+-----
-KubeCon EU 2026                              | developers.events::kubecon...         | 2026-06-01   | https://...
-...
-
-Summary:
-| fetched: 10
-| added: 8
-| updated: 2
-| closed: 0
-| cfp close window: 2026-05-15 → 2026-08-30
-```
-
-### Step 2: Preview Notion sync without writing anything
+To try the technology and country filter:
 
 ```bash
-python -m scripts.sync_notion --dry-run --limit 10
-```
-
-Expected output:
-```
-[DRY-RUN] CREATE: KubeCon EU 2026 (https://kccnceu2026.sched.com)
-[DRY-RUN] UPDATE: PyCon US 2026 (https://us.pycon.org/2026)
-...
-Summary:
-| created: 8
-| updated: 2
-| processed: 10
-| dry-run
-```
-
-### Step 3: Apply to Notion
-
-```bash
-# Small batch first
-python -m scripts.sync_notion --reconcile-missing --limit 10
-
-# Full run
-python -m scripts.sync_notion --reconcile-missing
+python -m scripts.sync_jira --filter
 ```
 
 ---
 
 ## Automated daily run
 
-The pipeline runs automatically via `.github/workflows/daily-update.yml` every day at 04:00 UTC:
+`.github/workflows/daily-update.yml` runs every day at 04:00 UTC:
 
-1. Fetches and updates `data/events.json`
-2. Syncs to Notion and reconciles closed CFPs
-3. Commits any changes back to the repo
+1. Refreshes `data/events.json`
+2. Syncs open CFPs to Jira and closes ones that dropped out of the feed
+3. Commits JSON changes back to the repo
 
-To trigger it manually: go to **Actions → Daily CFP Update → Run workflow**.
+Trigger it manually: **Actions → Daily CFP Update → Run workflow**.
 
 ---
 
 ## Repo layout
 
 ```
-data/           # Local JSON database (events.json)
+data/                 # Local JSON database (events.json)
 scripts/
-  main.py       # Fetch + merge pipeline
-  fetch_data.py # Pulls from developers.events API
-  merge_diff.py # Compares and saves to local DB
-  sync_notion.py # Syncs to Notion API
-.github/
-  workflows/
-    daily-update.yml  # Scheduled GitHub Action
+  main.py             # Fetch + merge pipeline
+  fetch_data.py       # Pulls from developers.events for the JSON database
+  merge_diff.py       # Compares and saves to the local DB
+  open_cfps.py        # Open-CFP fetch used by the Jira sync
+  sync_jira.py        # Syncs to Jira SPEAK
+  filters.py          # Optional technology and country lists
+  sync_notion.py      # Original Notion sync
+.github/workflows/
+  daily-update.yml    # Scheduled GitHub Action
 ```
 
 ---
@@ -240,3 +172,4 @@ scripts/
 
 - [**Aurélie Vache**](https://www.linkedin.com/in/aurelievache/), creator of [developers.events](https://developers.events/), the open-source platform that makes this project possible.
 - The [developers.events community](https://github.com/scraly/developers-conferences-agenda) for maintaining the conference data.
+- Edith, who built the original Notion sync this fork is based on.
