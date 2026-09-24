@@ -24,13 +24,14 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       - name: Run pipeline
         env:
-          NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_USER: ${{ secrets.JIRA_USER }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
         run: |
-          # 1) Refresh JSON (only open CFPs)
+          # 1) Refresh the local JSON database (open CFPs)
           python -m scripts.main
-          # 2) Upsert + reconcile in Notion (create/update current events, then close missing)
-          python -m scripts.sync_notion --reconcile-missing
+          # 2) Create/update Conferences in Jira SPEAK, then close CFPs that dropped out
+          python -m scripts.sync_jira --apply
       - name: Commit and push changes if any
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
