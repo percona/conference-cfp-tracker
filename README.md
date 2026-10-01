@@ -44,7 +44,7 @@ SPEAK already has conferences the team added by hand. The sync only touches issu
 
 - **Create**: a new open CFP becomes a Conference with **CFP Status** `Open`, **CFP Source** `developers.events`, and labels `developers-events` and `cfp-sync`.
 - **Update**: only source-owned fields are touched: **CFP Deadline**, **CFP Link**, and **Technology**. **Start date**, **Finish Date**, and **Due date** are updated when the event is rescheduled, unless a manager has already edited the card. Manual triage (`Slacked`, `Manual`, notes, assignee) is kept.
-- **Reconcile**: a `cfp-sync` conference that disappears from the open feed gets **CFP Status** `Closed`. If nobody has triaged it (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` too. Cards a manager already moved are not pulled back.
+- **Reconcile**: a `cfp-sync` conference that disappears from the open feed gets **CFP Status** `Closed`. If nobody has triaged it (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` too. Cards a manager already moved are not pulled back. If the event is still ahead and talks are already linked, the workflow is not closed: `Open` or `Closed` moves to `In Progress`, and Resolution is cleared. `Speakers Recruitment` and any other status a manager already set stay as they are.
 
 Matching is URL-based (lowercase host, no `www`, no query string, no trailing slash). If a conference changes its URL, a new issue is created and the old one is closed. Two CFPs that share one URL become one card; the later deadline is kept.
 
@@ -83,7 +83,7 @@ On later runs, for those cards only:
 
 - **CFP Deadline**, **CFP Link**, and **Technology** are updated from the feed.
 - **Start date**, **Finish Date**, and **Due date** are updated when the event is rescheduled, unless the Jira history already has an edit from a manager.
-- When the CFP leaves the open feed, **CFP Status** becomes `Closed`. If nobody has triaged the card (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` as well. `Slacked` and `Manual` are left in place while the CFP is still open.
+- When the CFP leaves the open feed, **CFP Status** becomes `Closed`. If nobody has triaged the card (Jira status still `Open`, CFP Status still `Open`, no assignee), the Jira status moves to `Closed` as well. `Slacked` and `Manual` are left in place while the CFP is still open. If the event date is still ahead and the card has linked talks, the workflow stays open for the manager: `Open` or `Closed` becomes `In Progress`, and a leftover Resolution such as `Declined` is cleared. `Speakers Recruitment` is left untouched.
 
 Matching is by conference URL (lowercase host, no `www`, no query string, no trailing slash). Two CFPs that share one URL become one card; the later deadline is kept.
 

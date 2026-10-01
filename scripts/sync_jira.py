@@ -14,6 +14,9 @@ Same pipeline as this repo's Notion sync, with Jira as the destination:
 - When a synced CFP drops out of the open feed, set CFP Status to Closed.
   If nobody has triaged the card (workflow still Open, CFP Status still Open,
   no assignee), also move the Jira status to Closed.
+  If the event is still ahead and talks are already linked, do not close the
+  workflow. Move Open or Closed to In Progress and clear Resolution. Speakers
+  Recruitment and any other status a manager already set are left as-is.
 
 Historical closed CFPs are never imported.
 
@@ -236,7 +239,9 @@ def load_conferences() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str],
             "summary",
             "labels",
             "status",
+            "resolution",
             "assignee",
+            "issuelinks",
             CONF_URL,
             CFP_STATUS,
             CFP_DEADLINE,
@@ -258,7 +263,9 @@ def load_conferences() -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str],
             "labels": fields.get("labels") or [],
             "url_key": url_key,
             "status": ((fields.get("status") or {}) or {}).get("name") or "",
+            "resolution": ((fields.get("resolution") or {}) or {}).get("name") or "",
             "assignee": (fields.get("assignee") or {}).get("accountId"),
+            "talk_links": talk_link_count(fields),
             "cfp_status": ((fields.get(CFP_STATUS) or {}) or {}).get("value"),
             "cfp_deadline": fields.get(CFP_DEADLINE),
             "cfp_link": fields.get(CFP_LINK),
@@ -392,7 +399,32 @@ def untouched(record: dict[str, Any]) -> bool:
     return cfp_status not in TRIAGED_CFP_STATUSES
 
 
-def transition_to_closed(key: str) -> None:
+def talk_link_count(fields: dict[str, Any]) -> int:
+    count = 0
+    for link in fields.get("issuelinks") or []:
+        if ((link.get("type") or {}).get("name")) != "Conf & Talk":
+            continue
+        other = link.get("outwardIssue") or link.get("inwardIssue") or {}
+        issue_type = ((other.get("fields") or {}).get("issuetype") or {}).get("name")
+        if issue_type in (None, "", "Talk"):
+            count += 1
+    return count
+
+
+def event_still_ahead(record: dict[str, Any]) -> bool:
+    start = str(record.get("start") or "")[:10]
+    if len(start) < 10:
+        return False
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return start >= today
+
+
+def talks_in_progress(record: dict[str, Any]) -> bool:
+    """CFP can be over while the event is ahead and talks are already linked."""
+    return event_still_ahead(record) and int(record.get("talk_links") or 0) > 0
+
+
+def transition_to(key: str, status_name: str) -> None:
     response = _http.get(
         f"{JIRA_URL}/rest/api/3/issue/{key}/transitions",
         headers=headers(),
@@ -404,17 +436,35 @@ def transition_to_closed(key: str) -> None:
         (
             item["id"]
             for item in response.json().get("transitions") or []
-            if ((item.get("to") or {}).get("name") == "Closed")
+            if ((item.get("to") or {}).get("name") == status_name)
         ),
         None,
     )
     if not transition_id:
-        raise RuntimeError(f"{key} has no transition to Closed")
+        raise RuntimeError(f"{key} has no transition to {status_name}")
     response = _http.post(
         f"{JIRA_URL}/rest/api/3/issue/{key}/transitions",
         headers=headers(),
         auth=auth(),
         json={"transition": {"id": transition_id}},
+        timeout=60,
+    )
+    if not response.ok:
+        raise RuntimeError(f"{response.status_code} {response.text[:500]}")
+
+
+def transition_to_closed(key: str) -> None:
+    transition_to(key, "Closed")
+
+
+def clear_resolution(key: str) -> None:
+    """Closed sets Resolution to Declined, and a later status move does not clear it."""
+    response = _http.put(
+        f"{JIRA_URL}/rest/api/3/issue/{key}",
+        headers=headers(),
+        auth=auth(),
+        params={"notifyUsers": "false"},
+        json={"fields": {"resolution": None}},
         timeout=60,
     )
     if not response.ok:
@@ -462,7 +512,7 @@ def main() -> None:
     filter_note = f" | after tech+country filter: {len(events)}" if args.filter else ""
     print(f"Open CFPs: {len(fetched)}{filter_note} | Jira conferences with URL: {len(by_url)}")
 
-    created = updated = skipped = closed = removed = errors = 0
+    created = updated = skipped = closed = removed = kept_active = errors = 0
     open_keys = {event["url_key"] for event in events}
     creates_done = 0
 
@@ -549,7 +599,45 @@ def main() -> None:
                     errors += 1
                     print(f"  ERROR {record['key']}: {exc}")
                 continue
-            if record.get("cfp_status") == "Closed":
+            status = record.get("status") or ""
+            resolution = record.get("resolution") or ""
+            cfp_closed = record.get("cfp_status") == "Closed"
+            if talks_in_progress(record):
+                # Talks are linked and the event has not happened. Closing the
+                # workflow sets Resolution to Declined. Keep the card in
+                # In Progress so the manager can keep working it. Speakers
+                # Recruitment, and any other status already chosen, stays.
+                target = "In Progress" if status in ("Open", "Closed") else status
+                needs_move = target != status
+                needs_clear = bool(resolution) or status == "Closed"
+                if cfp_closed and not needs_move and not needs_clear:
+                    continue
+                detail = (
+                    f"{record.get('talk_links')} talks, event {record.get('start')}"
+                )
+                if needs_move:
+                    print(f"KEEP {record['key']} {record['summary']} → In Progress ({detail})")
+                elif needs_clear:
+                    print(f"CLEAR {record['key']} {record['summary']} resolution ({detail})")
+                else:
+                    print(f"CLOSE {record['key']} {record['summary']} CFP Status only ({detail})")
+                if not args.apply:
+                    kept_active += 1
+                    continue
+                try:
+                    if not cfp_closed:
+                        update_issue(record["key"], {CFP_STATUS: option("Closed")})
+                    if needs_move:
+                        transition_to(record["key"], "In Progress")
+                    if needs_clear:
+                        clear_resolution(record["key"])
+                    kept_active += 1
+                    time.sleep(0.2)
+                except Exception as exc:
+                    errors += 1
+                    print(f"  ERROR {record['key']}: {exc}")
+                continue
+            if cfp_closed:
                 continue
             also_workflow = untouched(record)
             note = " + Jira status Closed" if also_workflow else " (Jira status left as-is)"
@@ -576,6 +664,7 @@ def main() -> None:
     print(f"| skipped (already in Jira, not owned): {skipped}")
     print(f"| removed: {removed}")
     print(f"| closed: {closed}")
+    print(f"| kept (cfp closed, talks linked): {kept_active}")
     print(f"| errors: {errors}")
     if not args.apply:
         print("| dry-run")
