@@ -32,6 +32,8 @@ jobs:
           python -m scripts.main
           # 2) Create/update Conferences in Jira SPEAK, then close CFPs that dropped out
           python -m scripts.sync_jira --apply
+          # 3) Talks: Due date follows Start date. If only Time is set, copy its date into Start date.
+          python -m scripts.sync_talk_dates --apply
       - name: Commit and push changes if any
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then

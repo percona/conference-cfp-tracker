@@ -124,6 +124,13 @@ python -m scripts.sync_jira --apply --limit 10
 python -m scripts.sync_jira --apply
 ```
 
+Talk calendar dates (dry-run, then write). Due date follows Start date. When a Talk has Time and no Start date, Start date is filled from Time:
+
+```bash
+python -m scripts.sync_talk_dates
+python -m scripts.sync_talk_dates --apply
+```
+
 Refresh the JSON database on its own:
 
 ```bash
@@ -144,7 +151,8 @@ python -m scripts.sync_jira --filter
 
 1. Refreshes `data/events.json`
 2. Syncs open CFPs to Jira and closes ones that dropped out of the feed
-3. Commits JSON changes back to the repo
+3. Aligns Talk dates: Due date follows Start date, and a missing Start date is filled from Time
+4. Commits JSON changes back to the repo
 
 Trigger it manually: **Actions → Daily CFP Update → Run workflow**.
 
