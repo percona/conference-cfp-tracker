@@ -12,11 +12,13 @@ Same pipeline as this repo's Notion sync, with Jira as the destination:
 - Start date, Finish Date, and Due date are refreshed when the event is
   rescheduled, unless the Jira history already has an edit from a manager.
 - When a synced CFP drops out of the open feed, set CFP Status to Closed.
-  If nobody has triaged the card (workflow still Open, CFP Status still Open,
-  no assignee), also move the Jira status to Closed.
-  If the event is still ahead and talks are already linked, do not close the
-  workflow. Move Open or Closed to In Progress and clear Resolution. Speakers
-  Recruitment and any other status a manager already set are left as-is.
+  The Jira status is moved to Closed only after the event has passed, and only
+  if nobody has triaged the card (workflow still Open, CFP Status not triaged,
+  no assignee).
+  If the event is still ahead and open talks are linked (not Closed or
+  Rejected), move Open, Closed,
+  or In Progress (not shown on the conference board) to Speakers Recruitment
+  and clear Resolution. Any other status a manager already set is left as-is.
 
 Historical closed CFPs are never imported.
 
@@ -64,6 +66,8 @@ OFFLINE_ONLINE = "customfield_11936"
 TECHNOLOGY = "customfield_13521"
 CFP_SOURCE = "customfield_13508"
 CFP_STATUS = "customfield_13509"
+ACTIVE_STATUS = "Speakers Recruitment"
+CLOSED_TALK_STATUSES = ("Closed", "Rejected")
 
 _http = requests.Session()
 _http.trust_env = False
@@ -405,8 +409,12 @@ def talk_link_count(fields: dict[str, Any]) -> int:
         if ((link.get("type") or {}).get("name")) != "Conf & Talk":
             continue
         other = link.get("outwardIssue") or link.get("inwardIssue") or {}
-        issue_type = ((other.get("fields") or {}).get("issuetype") or {}).get("name")
-        if issue_type in (None, "", "Talk"):
+        other_fields = other.get("fields") or {}
+        issue_type = (other_fields.get("issuetype") or {}).get("name")
+        status = (other_fields.get("status") or {}).get("name")
+        # Closed/Rejected talks, e.g. after the organizers cancel the event,
+        # must not pull a closed conference back to an active status.
+        if issue_type in (None, "", "Talk") and status not in CLOSED_TALK_STATUSES:
             count += 1
     return count
 
@@ -605,9 +613,14 @@ def main() -> None:
             if talks_in_progress(record):
                 # Talks are linked and the event has not happened. Closing the
                 # workflow sets Resolution to Declined. Keep the card in
-                # In Progress so the manager can keep working it. Speakers
-                # Recruitment, and any other status already chosen, stays.
-                target = "In Progress" if status in ("Open", "Closed") else status
+                # Speakers Recruitment so the manager can keep working it.
+                # The "In Progress" status is not mapped on the conference
+                # board, so cards in it are moved too. Any other status stays.
+                target = (
+                    ACTIVE_STATUS
+                    if status in ("Open", "Closed", "In Progress")
+                    else status
+                )
                 needs_move = target != status
                 needs_clear = bool(resolution) or status == "Closed"
                 if cfp_closed and not needs_move and not needs_clear:
@@ -616,7 +629,7 @@ def main() -> None:
                     f"{record.get('talk_links')} talks, event {record.get('start')}"
                 )
                 if needs_move:
-                    print(f"KEEP {record['key']} {record['summary']} → In Progress ({detail})")
+                    print(f"KEEP {record['key']} {record['summary']} → {ACTIVE_STATUS} ({detail})")
                 elif needs_clear:
                     print(f"CLEAR {record['key']} {record['summary']} resolution ({detail})")
                 else:
@@ -628,7 +641,7 @@ def main() -> None:
                     if not cfp_closed:
                         update_issue(record["key"], {CFP_STATUS: option("Closed")})
                     if needs_move:
-                        transition_to(record["key"], "In Progress")
+                        transition_to(record["key"], ACTIVE_STATUS)
                     if needs_clear:
                         clear_resolution(record["key"])
                     kept_active += 1
@@ -637,16 +650,27 @@ def main() -> None:
                     errors += 1
                     print(f"  ERROR {record['key']}: {exc}")
                 continue
-            if cfp_closed:
+            # A conference that is still ahead stays in its workflow status.
+            # The Jira card is closed only after the event has passed.
+            ahead = event_still_ahead(record)
+            also_workflow = untouched(record) and not ahead
+            if cfp_closed and not also_workflow:
                 continue
-            also_workflow = untouched(record)
-            note = " + Jira status Closed" if also_workflow else " (Jira status left as-is)"
+            if cfp_closed:
+                note = " Jira status Closed (event passed)"
+            elif also_workflow:
+                note = " + Jira status Closed"
+            elif ahead:
+                note = f" (event {record.get('start')} ahead, Jira status left as-is)"
+            else:
+                note = " (Jira status left as-is)"
             print(f"CLOSE {record['key']} {record['summary']}{note}")
             if not args.apply:
                 closed += 1
                 continue
             try:
-                update_issue(record["key"], {CFP_STATUS: option("Closed")})
+                if not cfp_closed:
+                    update_issue(record["key"], {CFP_STATUS: option("Closed")})
                 if also_workflow:
                     transition_to_closed(record["key"])
                 closed += 1
